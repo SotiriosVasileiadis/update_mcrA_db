@@ -1,0 +1,53 @@
+# ── R ─────────────────────────────────────────────────────────────────────────
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+*.Rout
+
+# ── Script caches / intermediate outputs ──────────────────────────────────────
+ncbi_annot_cache/
+build_cache/
+validation_cache/
+cdhit_out*
+*.blast_cache
+mcrA_accession_correspondence.tsv
+build_mcrA_db_R.log
+
+# MAFFT temporary files
+*.mafft_tmp
+*_aligned.fasta
+*_trimmed.fasta
+
+# HMM working files
+*.domtblout
+*.hmmout
+*.sto
+*.hmm.h3*
+
+# FastTree / RAxML / EPA-ng / GAPPA outputs (not part of the release)
+*.nwk
+*.jplace
+*.newick
+RAxML_*/
+cache_epa_*
+gappa_output/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Linux / editor ────────────────────────────────────────────────────────────
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# ── Large data files that should not be committed unintentionally ─────────────
+# (the released databases in databases/ are explicitly tracked)
+*.fastq
+*.fastq.gz
+*.bam
+*.sam
