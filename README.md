@@ -118,7 +118,7 @@ reference set into DADA2 format (`yang_2014_taxize.fasta`).
 ### 2. `calibrate_mcra_thresholds.R`
 
 Empirically calibrates phylogenetic patristic distance thresholds for each
-taxonomic rank (species → phylum) using the Youden-J ROC method, following [Yarza et al. (2014)](https://doi.org/10.1038/nrmicro3330).
+taxonomic rank (species → phylum) using the Youden-J ROC method of [Valles-Colomer et al. (2023)](https://doi.org/10.1038/s41586-022-05620-1), applied here to rank-level patristic distances following the framework of [Yarza et al. (2014)](https://doi.org/10.1038/nrmicro3330).
 
 **Workflow:**
 

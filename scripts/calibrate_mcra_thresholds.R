@@ -3,9 +3,14 @@
 # calibrate_mcra_thresholds.R
 #
 # Empirically calibrates phylogenetic distance thresholds for mcrA at each
-# taxonomic rank (species → phylum) using the Youden-J (ROC) method.
+# taxonomic rank (species → phylum) using the Youden-J (ROC) method
+# (Valles-Colomer et al. 2023, Nature 614:125).
 #
-# Method (mirrors Yarza et al. 2014, Nat Rev Microbiol 12:635):
+# Overall framework (patristic distances → rank-level thresholds) follows
+# Yarza et al. 2014, Nat Rev Microbiol 12:635; the Youden-J criterion for
+# selecting the optimal distance cutoff is from Valles-Colomer et al. 2023.
+#
+# Method:
 #   1. Load sequences and taxonomy from mcrAtemplate.fasta + tax4mcrA.taxonomy
 #   2. Align with MAFFT; build GTR tree with FastTree (NJ fallback)
 #   3. Compute full patristic distance matrix
