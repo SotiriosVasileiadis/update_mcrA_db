@@ -70,8 +70,12 @@ N_THREADS        <- 8L
 ASSEMBLY_LEVELS  <- NULL       # e.g. c("Complete Genome","Chromosome")
 
 # NCBI credentials
-ENTREZ_EMAIL     <- "vasiliad@gmail.com"
-rentrez::set_entrez_key("f7af40e4fb97a735bae78c1870be29914a08")
+ENTREZ_EMAIL     <- Sys.getenv("NCBI_EMAIL",    "your.email@example.com")  # required by NCBI
+NCBI_API_KEY     <- Sys.getenv("NCBI_API_KEY",  "")  # optional but raises rate limit to 10 req/s
+if (nzchar(NCBI_API_KEY)) rentrez::set_entrez_key(NCBI_API_KEY)
+# To set permanently, add to ~/.Renviron:
+#   NCBI_EMAIL=your.email@example.com
+#   NCBI_API_KEY=<your key from https://www.ncbi.nlm.nih.gov/account/>
 
 # Methanogenic archaeal lineages to query (NCBI taxonomy IDs)
 METHANOGEN_TAXA <- list(

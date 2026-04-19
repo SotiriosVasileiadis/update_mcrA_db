@@ -13,22 +13,28 @@
 #   3.  Fetch full sequences + GenBank records from NCBI  (rentrez)
 #   4.  Fetch taxonomy; correct names with taxize against current NCBI records
 #   5.  HMMER gene-coverage filter + trimming  (hmmsearch via system call)
-#   5b. Template taxonomy annotation transfer  (NEW)
-#         – BLAST NCBI candidates against mcrAtemplate.fasta
-#         – Matching sequences receive the curated lineage from
-#           tax4mcrA.taxonomy (overriding NCBI annotation)
-#         – Template-derived annotations are re-verified with taxize
-#   5c. Yang et al. annotation transfer  (local blastn via system call)
-#         – Applied only to sequences NOT already matched by template
-#         – Yang-derived annotations are re-verified with taxize
-#   6.  Filter by length / quality; deduplicate; build DADA2 entries
-#         with NCBI accession appended after the Species field
-#         Taxonomy priority: template > Yang > NCBI
+#   6.  Merge BLAST pool with yang_2014_taxize.fasta and mcrA_ncbi_genome_db.fasta;
+#         deduplicate exact-sequence duplicates by retaining the entry with the
+#         most complete lineage; append accession to the Species field
 #   7.  Alignment-based gap trimming  (MAFFT via system call)
 #         – trim alignment columns with ≥ GAP_THRESHOLD gap frequency
 #         – remove sequences ending / starting > TRIM_MIN_COVERAGE dense
 #           columns from the block boundaries
-#   8.  Write final DADA2 FASTA + accession correspondence TSV
+#   8.  Write mcrA_ncbi_nt_db.fasta  (NCBI taxonomy)
+#   9.  Phylogenetic taxonomy curation  →  mcrA_ncbi_nt_cur_db.fasta
+#         – FastTree GTR tree from accepted sequences
+#         – Patristic distance matrix  (ape::cophenetic.phylo)
+#         – Label each internal node at rank R with taxon X only if:
+#             (i)   all classified tips in the subtree agree unanimously on X
+#             (ii)  max intra-subtree patristic distance ≤ PHYLO_RANK_THRESHOLDS
+#             (iii) ALL tips in the full tree carrying X at rank R fall within
+#                   the subtree (strict monophyly; paraphyletic nodes rejected)
+#         – For each "Unclassified" tip: walk tip → root; assign ranks from
+#           the deepest ancestor that carries a qualifying label; fill coarser
+#           ranks still unresolved by unanimous consensus of known sequences
+#           in that ancestor's subtree
+#         – Taxize re-verification + higher-rank lineage fill
+#   10. Write accession correspondence TSV
 #
 # Required R packages (install once):
 #   install.packages(c("rentrez", "taxize", "Biostrings", "stringr",
@@ -40,7 +46,7 @@
 #   BiocManager::install("Biostrings")
 #
 # External tools (must be on PATH or paths set below):
-#   conda install -c bioconda hmmer mafft blast cd-hit
+#   conda install -c bioconda hmmer mafft blast cd-hit fasttree
 #
 # Usage:
 #   Rscript build_mcrA_db.R
@@ -74,9 +80,11 @@ OUTPUT_FILE      <- "mcrA_ncbi_nt_db.fasta"
 OUTPUT_CORRESPONDENCE <- "mcrA_accession_correspondence.tsv"
 LOG_FILE         <- "build_mcrA_db_R.log"
 
-ENTREZ_EMAIL     <- "vasiliad@gmail.com"         # required by NCBI
-# ENTREZ_API_KEY   <- Sys.getenv("NCBI_API_KEY")   # set env var or paste key here
-ENTREZ_API_KEY   <- "f7af40e4fb97a735bae78c1870be29914a08"
+ENTREZ_EMAIL     <- Sys.getenv("NCBI_EMAIL",    "your.email@example.com")  # required by NCBI
+ENTREZ_API_KEY   <- Sys.getenv("NCBI_API_KEY", "")  # optional but raises rate limit to 10 req/s
+# To set permanently, add to ~/.Renviron:
+#   NCBI_EMAIL=your.email@example.com
+#   NCBI_API_KEY=<your key from https://www.ncbi.nlm.nih.gov/account/>
 # BLAST parameters (web BLAST against NCBI nt)
 BLAST_DB          <- "nt"
 MIN_PERC_IDENTITY <- 80

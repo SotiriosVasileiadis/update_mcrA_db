@@ -1,7 +1,7 @@
 # update_mcrA_db — Updated *mcrA* Reference Databases for DADA2
 
 Curated *mcrA* (methyl-coenzyme M reductase subunit alpha) reference databases
-in DADA2 format, targeted at the amplicon window defined by the primer set of
+in dada2, Mothur, and QIIME2 format, targeted at the amplicon window defined by the primer set of
 [Angel et al. (2012)](https://doi.org/10.1038/ismej.2011.141), together with
 the R scripts used to build and evaluate them.
 
@@ -55,11 +55,11 @@ All databases follow the standard **DADA2 taxonomy header** format:
 ATGCGT...
 ```
 
-| Database folder | Sequences | Description |
-|-----------------|----------:|-------------|
-| `mcrA_ncbi_nt_db` | 27,942 | Amplicon-length mcrA sequences retrieved from NCBI nt via BLAST against the Yang et al. 2014 seed template; HMMER-verified (TIGR03256); taxonomy resolved with taxize against current NCBI records |
-| `mcrA_ncbi_nt_cur_db` | 27,942 | Same sequences as above; taxonomy additionally cross-referenced against the Yang et al. 2014 curated lineages and the NCBI genome annotation database, with priority: template > Yang > NCBI |
-| `mcrA_ncbi_genome_db` | 1,572 | Full CDS-length mcrA sequences extracted directly from annotated NCBI genomes of known methanogenic archaea; all sequences verified against TIGR03256 |
+| Database folder       | Sequences | Description                                                                                                                                                                                        |
+| --------------------- | --------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcrA_ncbi_nt_db`     |    27,942 | Amplicon-length mcrA sequences retrieved from NCBI nt via BLAST against the Yang et al. 2014 seed template; HMMER-verified (TIGR03256); taxonomy resolved with taxize against current NCBI records |
+| `mcrA_ncbi_nt_cur_db` |    27,942 | Same sequences as `mcrA_ncbi_nt_db`; taxonomy additionally curated by phylogenetic inference — a GTR tree is built with FastTree; internal nodes are labelled at rank R with taxon X only when (i) all classified descendants agree unanimously on X, (ii) max intra-subtree patristic distance ≤ calibrated rank threshold (Step 2), and (iii) all tips carrying X in the full tree are contained within the subtree (strict monophyly); labels are propagated to "Unclassified" tips from the deepest qualifying ancestor; updated names are re-verified with taxize |
+| `mcrA_ncbi_genome_db` |     1,572 | Full CDS-length mcrA sequences extracted directly from annotated NCBI genomes of known methanogenic archaea; all sequences verified against TIGR03256                                              |
 
 Each database folder contains three format subfolders: `dada2/`, `qiime2/`, and `mothur/`
 (see [Format conversion](#5-convert_db_formatsr) below).
@@ -70,18 +70,6 @@ Each database folder contains three format subfolders: `dada2/`, `qiime2/`, and 
 > contains full-length mcrA CDS sequences (~1,650 bp) and is most useful as a
 > phylogenetic reference or for primer evaluation against complete genes.
 
-### Using the databases with DADA2
-
-```r
-library(dada2)
-
-# Taxonomy assignment (assign to species level)
-taxa <- assignTaxonomy(
-  seqs    = your_seqtab_nochim,
-  refFasta = "databases/mcrA_ncbi_nt_cur_db/dada2/mcrA_ncbi_nt_cur_db.fasta",
-  multithread = TRUE
-)
-```
 
 ---
 
@@ -130,12 +118,11 @@ reference set into DADA2 format (`yang_2014_taxize.fasta`).
 ### 2. `calibrate_mcra_thresholds.R`
 
 Empirically calibrates phylogenetic patristic distance thresholds for each
-taxonomic rank (species → phylum) using the Youden-J ROC method, following the
-approach of [Yarza et al. (2014)](https://doi.org/10.1038/nrmicro3330).
+taxonomic rank (species → phylum) using the Youden-J ROC method, following [Yarza et al. (2014)](https://doi.org/10.1038/nrmicro3330).
 
 **Workflow:**
 
-1. Loads sequences and taxonomy from `mcrAtemplate.fasta` + `tax4mcrA.taxonomy`
+1. Loads sequences and taxonomy of the Yang et al. (2014) database: `mcrAtemplate.fasta` + `tax4mcrA.taxonomy`
 2. Aligns sequences with MAFFT; builds a GTR tree with FastTree (NJ fallback)
 3. Computes the full patristic distance matrix
 4. For every sequence pair, records the deepest rank at which the two
@@ -145,8 +132,12 @@ approach of [Yarza et al. (2014)](https://doi.org/10.1038/nrmicro3330).
    *J(d)* = sensitivity(*d*) + specificity(*d*) − 1
 6. Reports *d\** per rank with 95 % bootstrap confidence intervals (n = 999)
 
-The resulting thresholds are used in `build_mcrA_db.R` (Step 3) to guide
-annotation transfer by phylogenetic proximity.
+The resulting thresholds are hardcoded as constants into `build_mcrA_db.R`
+(Step 3) and used in Step 9 to constrain phylogenetic taxonomy curation: an
+internal tree node receives a rank label only when the maximum patristic distance
+across all its known-taxonomy descendants does not exceed the rank threshold.
+After re-running this script, update the `PHYLO_RANK_THRESHOLDS` constants in
+`build_mcrA_db.R` manually.
 
 **Required input files:**
 
@@ -172,33 +163,48 @@ and trim to the primer-amplified region.
 **Workflow:**
 
 0. Clusters the seed template at 95 % identity (CD-HIT-EST)
-1. BLASTs seed sequences against NCBI nt (NCBI BLAST API via rentrez / httr)
+1. BLASTs web-seed sequences against NCBI nt (NCBI BLAST API via rentrez / httr)
 2. Fetches full sequences and GenBank records (rentrez)
 3. Retrieves and corrects taxonomy with taxize against current NCBI records
 4. Applies HMMER gene-coverage filter and trims to HMM envelope coordinates
-5. **Template annotation transfer:** BLASTs NCBI candidates against
-   `mcrAtemplate.fasta`; matching sequences receive the curated Yang et al.
-   lineage (re-verified with taxize)
-6. **Yang et al. annotation transfer:** applied to sequences not matched
-   in step 5; Yang-derived annotations are re-verified with taxize
-7. Deduplicates; assigns taxonomy with priority template > Yang > NCBI;
-   appends NCBI accession to the Species field
-8. Performs MAFFT-based gap trimming of the final alignment
-9. Writes `mcrA_ncbi_nt_db.fasta` (NCBI taxonomy priority) and
-   `mcrA_ncbi_nt_cur_db.fasta` (curated annotation priority)
+5. Merges BLAST-retrieved sequences with `yang_2014_taxize.fasta` and
+   `mcrA_ncbi_genome_db.fasta`; deduplicates exact-sequence duplicates by
+   retaining the entry with the most complete lineage; appends NCBI accession
+   to the Species field
+6. Performs MAFFT-based gap trimming of the final alignment
+7. Writes `mcrA_ncbi_nt_db.fasta` (NCBI taxonomy)
+8. Writes accession correspondence TSV
+9. **Phylogenetic taxonomy curation** (→ `mcrA_ncbi_nt_cur_db.fasta`): builds a
+   GTR tree with FastTree; computes the full patristic distance matrix
+   (`ape::cophenetic.phylo`); labels each internal node at rank R with taxon X
+   only if all three conditions hold simultaneously: (i) all classified
+   (non-"Unclassified") tips within the subtree agree unanimously on taxon X at
+   rank R; (ii) the maximum intra-subtree patristic distance is ≤ the calibrated
+   rank threshold (genus/family/order/class — hardcoded from
+   `calibrate_mcra_thresholds.R` output); and (iii) every tip in the **full
+   tree** carrying taxon X at rank R is contained within that subtree (strict
+   monophyly — paraphyletic nodes are rejected); for each "Unclassified" tip,
+   walks tip-to-root and assigns ranks from the deepest ancestor that carries a
+   label; coarser ranks still unresolved after that assignment are filled by
+   unanimous consensus of all known sequences in the anchor's subtree; re-
+   verifies newly assigned names with taxize; fills any remaining Unclassified
+   higher ranks via taxize lineage lookup
 
-**Required input files (produced by Step 1):**
+**Required input files (produced by Steps 1 and 2):**
 
-- `yang_2014_taxize.fasta` — Yang et al. 2014 in DADA2 format
-- `mcrA_ncbi_genome_db.fasta` — NCBI genome annotation-based database
-- `mcrAtemplate.fasta` — Yang et al. (2014) template FASTA
-- `tax4mcrA.taxonomy` — Yang et al. (2014) taxonomy file
-- `mcra_rank_thresholds.tsv` — rank thresholds from Step 2
+- `yang_2014_taxize.fasta` — Yang et al. 2014 in DADA2 format (Step 1)
+- `mcrA_ncbi_genome_db.fasta` — NCBI genome annotation-based database (Step 1)
+- `TIGR03256.hmm` — TIGRFAM HMM profile (same as Step 1)
+
+> **Note:** the patristic-distance rank thresholds from Step 2
+> (`mcra_rank_thresholds.tsv`) are **not read at runtime**; they are hardcoded
+> as constants (`PHYLO_RANK_THRESHOLDS`) near the top of `build_mcrA_db.R`.
+> After re-running Step 2, update those constants manually.
 
 **R packages:** `rentrez`, `taxize`, `Biostrings`, `stringr`, `dplyr`,
 `readr`, `httr`, `xml2`, `ape`, `phangorn`
 
-**External tools:** `mafft`, `hmmer` (hmmsearch), `blast` (blastn),
+**External tools:** `mafft`, `FastTree`, `hmmer` (hmmsearch), `blast` (blastn),
 `cd-hit-est`
 
 ---
@@ -227,6 +233,11 @@ taxonomic resolution, and sequence composition.
 
 **R packages:** `tidyverse`, `ggplot2`, `patchwork`, `scales`, `ggvenn`,
 `pheatmap`, `vegan`
+
+> **Note:** this script uses `rstudioapi::getSourceEditorContext()$path` to
+> resolve its working directory and must be run interactively from within
+> RStudio (via **Source**). It is not compatible with `Rscript` on the command
+> line.
 
 ---
 
