@@ -48,13 +48,6 @@ update_mcrA_db/
 
 ## Databases
 
-All databases follow the standard **DADA2 taxonomy header** format:
-
-```
->Domain;Phylum;Class;Order;Family;Genus;Species;Accession
-ATGCGT...
-```
-
 | Database folder       | Sequences | Description                                                                                                                                                                                        |
 | --------------------- | --------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mcrA_ncbi_nt_db`     |    27,942 | Amplicon-length mcrA sequences retrieved from NCBI nt via BLAST against the Yang et al. 2014 seed template; HMMER-verified (TIGR03256); taxonomy resolved with taxize against current NCBI records |
