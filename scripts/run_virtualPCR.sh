@@ -24,7 +24,9 @@ set -euo pipefail
 # ── Paths (all relative to this script's location) ───────────────────────────
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # scripts/
 REPO_DIR="$(cd "${BASE_DIR}/.." && pwd)"                   # repo root
-JAR="${BASE_DIR}/virtualPCR/dist/virtualPCR.jar"
+# Path to the virtualPCR JAR — clone https://github.com/rkalendar/virtualPCR
+# and build with 'mvn package -DskipTests', then set this variable accordingly.
+JAR="/path/to/virtualPCR/dist/virtualPCR.jar"
 RES_DIR="${REPO_DIR}/results/primer_coverage"
 PRIMER_FILE="${RES_DIR}/primers.fasta"
 

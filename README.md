@@ -43,8 +43,7 @@ update_mcrA_db/
 │   ├── run_virtualPCR.sh              # Step 6a — in silico PCR (single mismatch level)
 │   ├── run_mismatch_sweep.sh          # Step 6b — sweep over 0–3 3'-end mismatches
 │   ├── parse_virtualPCR.R             # Step 6c — parse single-run results → coverage tables
-│   ├── parse_mismatch_sweep.R         # Step 6d — parse sweep results → tables & plots
-│   └── virtualPCR/dist/virtualPCR.jar # virtualPCR executable JAR
+│   └── parse_mismatch_sweep.R         # Step 6d — parse sweep results → tables & plots
 ├── results/                           # Output of Step 6 scripts (created at run time)
 │   ├── primer_coverage/               # Output of run_virtualPCR.sh
 │   ├── primer_coverage_sweep_errors0/ # Output of mismatch sweep at 0 mismatches
@@ -372,8 +371,24 @@ Rscript scripts/parse_mismatch_sweep.R
 All Step 6 scripts resolve paths relative to their own location and can be
 called from any working directory.
 
-**Java requirement (virtualPCR):** virtualPCR requires **OpenJDK ≥ 25**.
-Create a dedicated conda environment once:
+**virtualPCR installation:** virtualPCR is available at
+<https://github.com/rkalendar/virtualPCR>.  Clone the repository and build
+the JAR once:
+
+```bash
+git clone https://github.com/rkalendar/virtualPCR.git
+cd virtualPCR
+mvn package -DskipTests          # requires Maven; produces dist/virtualPCR.jar
+```
+
+Then edit the `JAR=` line near the top of `run_virtualPCR.sh` to point to the
+built JAR:
+
+```bash
+JAR="/path/to/virtualPCR/dist/virtualPCR.jar"
+```
+
+virtualPCR requires **OpenJDK ≥ 25**.  Install via conda (recommended):
 
 ```bash
 conda create --name java25 openjdk=25 -c conda-forge --yes
@@ -423,17 +438,18 @@ conda install -c conda-forge ncbi-datasets-cli
 
 See `software_versions.tsv` for the exact versions used in this study.
 
-### Java (Step 6 only)
+### virtualPCR and Java (Step 6 only)
 
-virtualPCR requires **OpenJDK ≥ 25**.  Install via conda (recommended):
+virtualPCR (<https://github.com/rkalendar/virtualPCR>) requires **OpenJDK ≥ 25**.
+Clone and build the JAR (requires Maven), then point `run_virtualPCR.sh` to it
+(see Step 6 above).  Install Java via conda (recommended):
 
 ```bash
 conda create --name java25 openjdk=25 -c conda-forge --yes
 ```
 
-The `run_virtualPCR.sh` and `run_mismatch_sweep.sh` scripts activate the
-`java25` environment automatically.  If conda is not available, any JDK ≥ 25
-installation reachable as `java` on `PATH` will work — remove or adapt the
+The shell scripts activate this environment automatically.  If conda is not
+available, any JDK ≥ 25 on `PATH` will work — remove or adapt the
 `conda activate` block in `run_virtualPCR.sh`.
 
 ---
