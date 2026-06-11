@@ -39,7 +39,21 @@ update_mcrA_db/
 │   ├── calibrate_mcra_thresholds.R    # Step 2 — phylogenetic rank-threshold calibration
 │   ├── build_mcrA_db.R                # Step 3 — amplicon DB (seed-and-expand from NCBI nt)
 │   ├── compare_mcrA_databases2.R      # Step 4 — cross-database comparison
-│   └── convert_db_formats.R           # Step 5 — convert DADA2 databases to QIIME2 / Mothur
+│   ├── convert_db_formats.R           # Step 5 — convert DADA2 databases to QIIME2 / Mothur
+│   ├── run_virtualPCR.sh              # Step 6a — in silico PCR (single mismatch level)
+│   ├── run_mismatch_sweep.sh          # Step 6b — sweep over 0–3 3'-end mismatches
+│   ├── parse_virtualPCR.R             # Step 6c — parse single-run results → coverage tables
+│   ├── parse_mismatch_sweep.R         # Step 6d — parse sweep results → tables & plots
+│   └── virtualPCR/dist/virtualPCR.jar # virtualPCR executable JAR
+├── results/                           # Output of Step 6 scripts (created at run time)
+│   ├── primer_coverage/               # Output of run_virtualPCR.sh
+│   ├── primer_coverage_sweep_errors0/ # Output of mismatch sweep at 0 mismatches
+│   ├── primer_coverage_sweep_errors1/ #                              1
+│   ├── primer_coverage_sweep_errors2/ #                              2
+│   ├── primer_coverage_sweep_errors3/ #                              3
+│   ├── mismatch_sweep_summary.tsv     # Long-format cross-mismatch coverage table
+│   ├── mismatch_sweep_wide.tsv        # Wide-format pivot
+│   └── taxonomy/                      # Per-taxon TSVs and multi-panel PDF plot
 ├── software_versions.tsv              # R package and external tool versions
 └── README.md
 ```
@@ -48,11 +62,11 @@ update_mcrA_db/
 
 ## Databases
 
-| Database folder       | Sequences | Description                                                                                                                                                                                        |
-| --------------------- | --------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcrA_ncbi_nt_db`     |    27,942 | Amplicon-length mcrA sequences retrieved from NCBI nt via BLAST against the Yang et al. 2014 seed template; HMMER-verified (TIGR03256); taxonomy resolved with taxize against current NCBI records |
-| `mcrA_ncbi_nt_cur_db` |    27,942 | Same sequences as `mcrA_ncbi_nt_db`; taxonomy additionally curated by phylogenetic inference — a GTR tree is built with FastTree; internal nodes are labelled at rank R with taxon X only when (i) all classified descendants agree unanimously on X, (ii) max intra-subtree patristic distance ≤ calibrated rank threshold (Step 2), and (iii) all tips carrying X in the full tree are contained within the subtree (strict monophyly); labels are propagated to "Unclassified" tips from the deepest qualifying ancestor; updated names are re-verified with taxize |
-| `mcrA_ncbi_genome_db` |     1,572 | Full CDS-length mcrA sequences extracted directly from annotated NCBI genomes of known methanogenic archaea; all sequences verified against TIGR03256                                              |
+| Database folder       | Label (manuscript) | Sequences | Description                                                                                                                                                                                        |
+| --------------------- | :----------------: | --------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcrA_ncbi_nt_db`     | **mlas-MCRA**      |    27,942 | Amplicon-length mcrA sequences retrieved from NCBI nt via BLAST against the Yang et al. 2014 seed template; HMMER-verified (TIGR03256); taxonomy resolved with taxize against current NCBI records |
+| `mcrA_ncbi_nt_cur_db` | **mlas-MCRA_CUR**  |    27,942 | Same sequences as `mcrA_ncbi_nt_db`; taxonomy additionally curated by phylogenetic inference — a GTR tree is built with FastTree; internal nodes are labelled at rank R with taxon X only when (i) all classified descendants agree unanimously on X, (ii) max intra-subtree patristic distance ≤ calibrated rank threshold (Step 2), and (iii) all tips carrying X in the full tree are contained within the subtree (strict monophyly); labels are propagated to "Unclassified" tips from the deepest qualifying ancestor; updated names are re-verified with taxize |
+| `mcrA_ncbi_genome_db` | **MCRA_FULL**      |     1,572 | Full CDS-length mcrA sequences extracted directly from annotated NCBI genomes of known methanogenic archaea; all sequences verified against TIGR03256                                              |
 
 Each database folder contains three format subfolders: `dada2/`, `qiime2/`, and `mothur/`
 (see [Format conversion](#5-convert_db_formatsr) below).
@@ -271,6 +285,104 @@ Rscript scripts/convert_db_formats.R databases/
 
 ---
 
+### 6. In silico PCR — primer coverage assessment
+
+Evaluates the coverage of the **mlas-mod-F / mcrA-rev-R** primer pair against
+the three databases using [virtualPCR](https://doi.org/10.3389/fbinf.2024.1464197)
+in silico PCR, then generates per-database and per-taxon coverage tables and plots.
+
+> **Prerequisite — unzip databases before running.**
+> The FASTA files are distributed as zip archives.  Unzip each one before running
+> Step 6 scripts:
+> ```bash
+> cd databases
+> for z in *.zip; do unzip "$z"; done
+> cd ..
+> ```
+
+**Primers**
+
+| Name | Sequence (5'→3') | Note |
+|---|---|---|
+| mlas-mod-F | `GGYGGTGTMGGDTTCACMCARTA` | Forward |
+| mcrA-rev-R | `BGCGTAGTTVGGRTAGT` | Reverse; first 7 bases (CGTTCAT) of the published primer excluded |
+
+#### Step 6a — Single in silico PCR run (`run_virtualPCR.sh`)
+
+Runs virtualPCR with **1 allowed 3'-end mismatch** against all three databases.
+Results are written to `results/primer_coverage/`.
+
+```bash
+bash scripts/run_virtualPCR.sh
+```
+
+Key parameters (edit at the top of the script):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `N3_ERRORS` | `1` | Allowed mismatches at the 3' end of each primer |
+| `MIN_LEN` | `100` | Minimum expected amplicon length (bp) |
+| `MAX_LEN` | `900` | Maximum expected amplicon length (bp) |
+
+Output per database: `results/primer_coverage/<db_name>/config.txt` and
+`results/primer_coverage/<db_name>/report.out`.
+
+#### Step 6b — Mismatch sweep (`run_mismatch_sweep.sh`)
+
+Runs virtualPCR four times, varying `number3errors` from 0 to 3.
+Results land in `results/primer_coverage_sweep_errors0/` through
+`results/primer_coverage_sweep_errors3/`.
+
+```bash
+bash scripts/run_mismatch_sweep.sh            # runs all four levels (0–3)
+bash scripts/run_mismatch_sweep.sh 0 2        # run only specific levels
+```
+
+#### Step 6c — Parse single-run results (`parse_virtualPCR.R`)
+
+Parses `results/primer_coverage/` and writes:
+
+- `results/primer_coverage/coverage_summary.tsv` — per-database overall coverage
+- `results/primer_coverage/taxonomy/taxonomy_coverage_<db>.tsv` — per-taxon
+  coverage (domain → genus) for each database
+- `results/primer_coverage/taxonomy/plots/coverage_<level>.pdf` — line plots
+
+```bash
+Rscript scripts/parse_virtualPCR.R
+```
+
+#### Step 6d — Parse sweep results and generate plots (`parse_mismatch_sweep.R`)
+
+Parses all `results/primer_coverage_sweep_errorsN/` directories and writes:
+
+- `results/mismatch_sweep_summary.tsv` — long-format table (database × mismatches × coverage)
+- `results/mismatch_sweep_wide.tsv` — wide-format pivot
+- `results/taxonomy/sweep_taxonomy_<level>.tsv` — per-taxon coverage per mismatch level
+- `results/taxonomy/sweep_taxonomy_all_levels.tsv` — all levels combined (renamed columns:
+  `3-end mismatches`, `hits`, `missed`; renamed database labels: `mlas-MCRA`,
+  `mlas-MCRA_CUR`, `MCRA_FULL`)
+- `results/taxonomy/plots/sweep_taxonomy_all_levels.pdf` — combined multi-panel PDF:
+  rows = taxonomic levels (phylum → genus), columns = databases + shared legend;
+  y-axis = hits (%), x-axis = 3'-end allowed mismatches
+
+```bash
+Rscript scripts/parse_mismatch_sweep.R
+```
+
+All Step 6 scripts resolve paths relative to their own location and can be
+called from any working directory.
+
+**Java requirement (virtualPCR):** virtualPCR requires **OpenJDK ≥ 25**.
+Create a dedicated conda environment once:
+
+```bash
+conda create --name java25 openjdk=25 -c conda-forge --yes
+```
+
+The shell scripts activate this environment automatically.
+
+---
+
 ## Dependencies
 
 ### R (≥ 4.3)
@@ -311,6 +423,19 @@ conda install -c conda-forge ncbi-datasets-cli
 
 See `software_versions.tsv` for the exact versions used in this study.
 
+### Java (Step 6 only)
+
+virtualPCR requires **OpenJDK ≥ 25**.  Install via conda (recommended):
+
+```bash
+conda create --name java25 openjdk=25 -c conda-forge --yes
+```
+
+The `run_virtualPCR.sh` and `run_mismatch_sweep.sh` scripts activate the
+`java25` environment automatically.  If conda is not available, any JDK ≥ 25
+installation reachable as `java` on `PATH` will work — remove or adapt the
+`conda activate` block in `run_virtualPCR.sh`.
+
 ---
 
 ## Recommended workflow
@@ -335,10 +460,31 @@ Step 4  compare_mcrA_databases2.R
 Step 5  convert_db_formats.R
     (requires outputs of Steps 1 & 3)
           ↓ <db>/dada2/, <db>/qiime2/, <db>/mothur/
+
+Step 6  Primer coverage assessment (requires unzipped databases from Steps 1 & 3)
+
+  # Unzip databases
+  cd databases && for z in *.zip; do unzip "$z"; done && cd ..
+
+  # Run mismatch sweep (0–3 mismatches)
+  bash scripts/run_mismatch_sweep.sh
+
+  # Parse sweep results → tables + multi-panel PDF
+  Rscript scripts/parse_mismatch_sweep.R
+
+  # Optional: parse single-run results (N3_ERRORS=1) separately
+  bash scripts/run_virtualPCR.sh
+  Rscript scripts/parse_virtualPCR.R
+          ↓ results/primer_coverage/
+          ↓ results/primer_coverage_sweep_errorsN/
+          ↓ results/mismatch_sweep_summary.tsv
+          ↓ results/taxonomy/sweep_taxonomy_all_levels.tsv
+          ↓ results/taxonomy/plots/sweep_taxonomy_all_levels.pdf
 ```
 
-All scripts read and write files in the current working directory; run each
-script from the folder containing its input files.
+Steps 1–5 read and write files in the current working directory; run each
+script from the folder containing its input files.  Step 6 scripts resolve
+all paths relative to their own location and can be called from any directory.
 
 ---
 
@@ -355,6 +501,10 @@ If you use these databases or scripts, please cite:
 - **Yang S, Liebner S, Alawi M, Ebenhöh O, Rennert T** (2014) Taxonomic
   database and cut-off value for processing mcrA gene 454 pyrosequencing data
   by MOTHUR and QIIME. *Journal of Microbiological Methods* **103**, 3–5.
+
+- **Kalendar R *et al.*** (2024) virtualPCR — a tool for in silico primer
+  testing. *Frontiers in Bioinformatics* **4**, 1464197.
+  https://doi.org/10.3389/fbinf.2024.1464197
 
 ---
 
