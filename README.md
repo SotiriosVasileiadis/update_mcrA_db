@@ -5,6 +5,8 @@ in dada2, Mothur, and QIIME2 format, targeted at the amplicon window defined by 
 [Angel et al. (2012)](https://doi.org/10.1038/ismej.2011.141), together with
 the R scripts used to build and evaluate them.
 
+Detailed information and the results overview can be found here and and in our publication [(Vasileiadis et al., 2026)](https://doi.org/10.1016/j.syapm.2026.126752) 
+
 The databases supersede the Yang et al. (2014) *mcrA* reference set with
 broader sequence coverage, HMM-verified gene boundaries, and updated NCBI
 taxonomy.
