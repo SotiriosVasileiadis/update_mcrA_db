@@ -508,6 +508,8 @@ all paths relative to their own location and can be called from any directory.
 
 If you use these databases or scripts, please cite:
 
+- Our publication: **Vasileiadis, S., Valmas, M.I., Pitsikoglou, D.S., Rodosthenous, J., Omirou, M., Kotsopoulos, T.A., Yan, Y., Fu, D., Fotidis, I.A.** (2026). Up-to-date, and taxonomy-curated mcrA reference databases for methanogen community profiling. Systematic and Applied Microbiology **49**(5), 126752. https://doi.org/https://doi.org/10.1016/j.syapm.2026.126752.
+
 - **This repository** (please use the GitHub URL / DOI once released)
 
 - **Angel R, Claus P, Conrad R** (2012) Activation of methanogenesis in arid
