@@ -26,6 +26,8 @@ update_mcrA_db/
 │   │                mcrA_ncbi_nt_db.taxonomy
 │   ├── mcrA_ncbi_nt_cur_db/           # updated DB with curated taxonomy  (27,942 seqs)
 │   │   ├── dada2/   mcrA_ncbi_nt_cur_db.fasta
+│   │   │            mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta   # assignTaxonomy training set
+│   │   │            mcrA_ncbi_nt_cur_db_dada2_species.fasta   # addSpecies reference
 │   │   ├── qiime2/  mcrA_ncbi_nt_cur_db_seqs.fasta
 │   │   │            mcrA_ncbi_nt_cur_db_taxonomy.tsv
 │   │   └── mothur/  mcrA_ncbi_nt_cur_db.fasta
@@ -66,11 +68,23 @@ update_mcrA_db/
 | Database folder       | Label (manuscript) | Sequences | Description                                                                                                                                                                                        |
 | --------------------- | :----------------: | --------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mcrA_ncbi_nt_db`     | **mlas-MCRA**      |    27,942 | Amplicon-length mcrA sequences retrieved from NCBI nt via BLAST against the Yang et al. 2014 seed template; HMMER-verified (TIGR03256); taxonomy resolved with taxize against current NCBI records |
-| `mcrA_ncbi_nt_cur_db` | **mlas-MCRA_CUR**  |    27,942 | Same sequences as `mcrA_ncbi_nt_db`; taxonomy additionally curated by phylogenetic inference — a GTR tree is built with FastTree; internal nodes are labelled at rank R with taxon X only when (i) all classified descendants agree unanimously on X, (ii) max intra-subtree patristic distance ≤ calibrated rank threshold (Step 2), and (iii) all tips carrying X in the full tree are contained within the subtree (strict monophyly); labels are propagated to "Unclassified" tips from the deepest qualifying ancestor; updated names are re-verified with taxize |
+| `mcrA_ncbi_nt_cur_db` | **mlas-MCRA_CUR**  |    27,942 | Same sequences as `mcrA_ncbi_nt_db`; taxonomy additionally curated in three stages (Step 3, step 9): (a) neighbour-guided label cleaning — unknown placeholders collapsed to "Unclassified", per-rank % identity cut-offs calibrated from vsearch nearest-neighbour pairs, one parent per taxon name, and named labels contradicted by near-identical neighbours corrected; (b) phylogenetic inference — a GTR tree is built with FastTree; internal nodes are labelled at rank R with taxon X only when (i) all classified descendants agree unanimously on X, (ii) max intra-subtree patristic distance ≤ calibrated rank threshold (Step 2), and (iii) all tips carrying X in the full tree are contained within the subtree (strict monophyly); labels are propagated to "Unclassified" tips from the deepest qualifying ancestor; updated names are re-verified with taxize; (c) remaining "Unclassified" ranks filled from agreeing near neighbours. The `dada2/` folder also holds an `assignTaxonomy` training set (Kingdom → Genus) and an `addSpecies` reference |
 | `mcrA_ncbi_genome_db` | **MCRA_FULL**      |     1,572 | Full CDS-length mcrA sequences extracted directly from annotated NCBI genomes of known methanogenic archaea; all sequences verified against TIGR03256                                              |
 
 Each database folder contains three format subfolders: `dada2/`, `qiime2/`, and `mothur/`
 (see [Format conversion](#5-convert_db_formatsr) below).
+
+> **Using `mcrA_ncbi_nt_cur_db` with dada2.** Train `assignTaxonomy()` on
+> `mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta` and add species with `addSpecies()`:
+> ```r
+> taxa <- assignTaxonomy(seqs, "mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta", multithread = TRUE)
+> taxa <- addSpecies(taxa, "mcrA_ncbi_nt_cur_db_dada2_species.fasta")
+> ```
+> In the training set, each lineage stops at its last known rank. Exact duplicate
+> sequences are collapsed to their shared lineage, and sequences of unknown
+> phylum are left out. `assignTaxonomy()` treats every distinct header string as
+> a separate taxon, so the 8-field `mcrA_ncbi_nt_cur_db.fasta` (which ends in the
+> accession) is not suited to training the classifier.
 
 > **Note — amplicon vs full-length sequences.** `mcrA_ncbi_nt_db` and
 > `mcrA_ncbi_nt_cur_db` contain sequences in the amplicon window of the
@@ -182,21 +196,60 @@ and trim to the primer-amplified region.
 6. Performs MAFFT-based gap trimming of the final alignment
 7. Writes `mcrA_ncbi_nt_db.fasta` (NCBI taxonomy)
 8. Writes accession correspondence TSV
-9. **Phylogenetic taxonomy curation** (→ `mcrA_ncbi_nt_cur_db.fasta`): builds a
-   GTR tree with FastTree; computes the full patristic distance matrix
-   (`ape::cophenetic.phylo`); labels each internal node at rank R with taxon X
-   only if all three conditions hold simultaneously: (i) all classified
-   (non-"Unclassified") tips within the subtree agree unanimously on taxon X at
-   rank R; (ii) the maximum intra-subtree patristic distance is ≤ the calibrated
-   rank threshold (genus/family/order/class — hardcoded from
-   `calibrate_mcra_thresholds.R` output); and (iii) every tip in the **full
-   tree** carrying taxon X at rank R is contained within that subtree (strict
-   monophyly — paraphyletic nodes are rejected); for each "Unclassified" tip,
-   walks tip-to-root and assigns ranks from the deepest ancestor that carries a
-   label; coarser ranks still unresolved after that assignment are filled by
-   unanimous consensus of all known sequences in the anchor's subtree; re-
-   verifies newly assigned names with taxize; fills any remaining Unclassified
-   higher ranks via taxize lineage lookup
+9. **Taxonomy curation** (→ `mcrA_ncbi_nt_cur_db.fasta`), in three stages:
+   - **9a. Neighbour-guided label cleaning.**
+     - Unknown placeholders (`<Taxon>_unclassified`, `uncultured…`, empty)
+       are collapsed to "Unclassified", the only value 9b treats as unknown.
+     - All sequences are searched against each other with vsearch (≥ 80 %
+       identity, up to 100 hits each).
+     - For each rank, an identity cut-off is calibrated from neighbour pairs
+       whose labels come from the original records. It is the lowest identity
+       above which ≥ 98 % of pairs share the taxon (`PRECISION_TARGET`), and the
+       cut-offs are made non-decreasing from kingdom to genus.
+     - Each taxon name is given the parent carried by ≥ 90 % of the original
+       records with that name.
+     - A named label is replaced when ≥ 3 neighbours above the cut-off agree on
+       another taxon with ≥ 90 % support. It is blanked when no neighbour
+       supports it.
+     - Genome-derived records (GCA_/GCF_ accessions) are never changed.
+   - **9b. Phylogenetic taxonomy curation.**
+     - A GTR tree is built with FastTree.
+     - Each internal node is labelled at rank R with taxon X only if all three
+       conditions hold:
+       - (i) all classified (non-"Unclassified") tips within the subtree agree
+         unanimously on taxon X at rank R;
+       - (ii) the maximum intra-subtree patristic distance is ≤ the calibrated
+         rank threshold (genus/family/order/class, hardcoded from
+         `calibrate_mcra_thresholds.R` output);
+       - (iii) every tip in the **full tree** carrying taxon X at rank R is
+         contained within that subtree (strict monophyly; paraphyletic nodes
+         are rejected).
+     - For each "Unclassified" tip, the script walks tip-to-root and assigns
+       ranks from the deepest ancestor that carries a label. Coarser ranks still
+       unresolved after that are filled by unanimous consensus of all known
+       sequences in the anchor's subtree.
+     - Newly assigned names are re-verified with taxize, and any remaining
+       Unclassified higher ranks are filled via taxize lineage lookup.
+     - The maximum patristic distance within each clade is computed as the
+       clade's diameter in one pass over the tree, so no full patristic
+       distance matrix is needed (`FAST_NODE_LABELLING = FALSE` uses the
+       matrix-based functions instead).
+   - **9c. Neighbour-guided check and fill.**
+     - Labels added in 9b are checked against near neighbours as in 9a.
+     - Ranks still "Unclassified" are filled when ≥ 2 original-record
+       neighbours above the rank cut-off agree (≥ 90 %), provided the taxon's
+       parent matches the sequence's own parent label.
+     - Lineage consistency is enforced again.
+
+   Outputs of step 9:
+   - `mcrA_ncbi_nt_cur_db.fasta` (8-field DADA2 headers)
+   - `mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta` (`assignTaxonomy` training set)
+   - `mcrA_ncbi_nt_cur_db_dada2_species.fasta` (`addSpecies` reference)
+   - `mcrA_ncbi_nt_cur_db_changes.tsv` (every label change, with the number
+     of supporting and voting neighbours)
+   - `mcrA_ncbi_nt_cur_db_identity_cutoffs.tsv`
+   - `mcrA_ncbi_nt_cur_db_curation_summary.tsv` ("Unclassified" counts per
+     rank after each stage)
 
 **Required input files (produced by Steps 1 and 2):**
 
@@ -213,7 +266,7 @@ and trim to the primer-amplified region.
 `readr`, `httr`, `xml2`, `ape`, `phangorn`
 
 **External tools:** `mafft`, `FastTree`, `hmmer` (hmmsearch), `blast` (blastn),
-`cd-hit-est`
+`cd-hit-est`, `vsearch`
 
 ---
 
@@ -281,6 +334,12 @@ Rscript scripts/convert_db_formats.R databases/
 
 **Required input:** DADA2-format `.fasta` files in the target directory
 (produced by Steps 1 and 3).
+
+> **Note:** keep only the 8-field database FASTA files in the target directory.
+> The `assignTaxonomy` training set and the `addSpecies` reference written by
+> Step 3 (`mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta`,
+> `mcrA_ncbi_nt_cur_db_dada2_species.fasta`) do not carry accession fields and
+> are copied into `mcrA_ncbi_nt_cur_db/dada2/` directly.
 
 **No R packages required** — uses base R only.
 
@@ -425,7 +484,7 @@ BiocManager::install("Biostrings")
 All tools are installable via conda (recommended):
 
 ```bash
-conda install -c bioconda hmmer mafft blast cd-hit fasttree
+conda install -c bioconda hmmer mafft blast cd-hit fasttree vsearch
 conda install -c conda-forge ncbi-datasets-cli
 ```
 
@@ -436,6 +495,7 @@ conda install -c conda-forge ncbi-datasets-cli
 | HMMER (hmmsearch) | 3.x | HMM-based gene verification and trimming |
 | BLAST+ (blastn) | 2.x | Sequence search and annotation transfer |
 | CD-HIT-EST | 4.x | Seed clustering |
+| VSEARCH | 2.30.0 | Nearest-neighbour search for taxonomy curation (Step 3, step 9) |
 | NCBI Datasets CLI | — | Genome batch download (optional) |
 
 See `software_versions.tsv` for the exact versions used in this study.
@@ -470,6 +530,8 @@ Step 3  build_mcrA_db.R
     (requires outputs of Steps 1 & 2)
           ↓ mcrA_ncbi_nt_db.fasta
           ↓ mcrA_ncbi_nt_cur_db.fasta
+          ↓ mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta
+          ↓ mcrA_ncbi_nt_cur_db_dada2_species.fasta
 
 Step 4  compare_mcrA_databases2.R
     (requires outputs of Steps 1 & 3)

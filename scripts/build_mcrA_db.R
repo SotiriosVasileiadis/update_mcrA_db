@@ -22,18 +22,40 @@
 #           columns from the block boundaries
 #   8.  Write mcrA_ncbi_nt_db.fasta  (NCBI taxonomy)
 #   9.  Phylogenetic taxonomy curation  →  mcrA_ncbi_nt_cur_db.fasta
-#         – FastTree GTR tree from accepted sequences
-#         – Patristic distance matrix  (ape::cophenetic.phylo)
-#         – Label each internal node at rank R with taxon X only if:
-#             (i)   all classified tips in the subtree agree unanimously on X
-#             (ii)  max intra-subtree patristic distance ≤ PHYLO_RANK_THRESHOLDS
-#             (iii) ALL tips in the full tree carrying X at rank R fall within
-#                   the subtree (strict monophyly; paraphyletic nodes rejected)
-#         – For each "Unclassified" tip: walk tip → root; assign ranks from
-#           the deepest ancestor that carries a qualifying label; fill coarser
-#           ranks still unresolved by unanimous consensus of known sequences
-#           in that ancestor's subtree
-#         – Taxize re-verification + higher-rank lineage fill
+#         9a. Label cleaning before the tree step (removes local disagreements
+#             between near-identical references):
+#             – collapse unknown placeholders ("<X>_unclassified", "uncultured…")
+#               to "Unclassified", the only value step 9b treats as unknown
+#             – vsearch all-vs-all neighbours; per-rank % identity cut-off =
+#               lowest identity above which ≥ PRECISION_TARGET of original-record
+#               neighbour pairs share the taxon (non-decreasing kingdom → genus)
+#             – each name takes the parent carried by ≥ MIN_AGREEMENT of the
+#               original records with that name
+#             – a named label is replaced when ≥ MIN_SUPPORT_FIX neighbours above
+#               the cut-off agree on another taxon with ≥ MIN_AGREEMENT support,
+#               and blanked when no neighbour supports it; genome-derived records
+#               (GCA_/GCF_) are never changed
+#         9b. Tree-based curation (unchanged rules)
+#             – FastTree GTR tree from accepted sequences
+#             – Label each internal node at rank R with taxon X only if:
+#                 (i)   all classified tips in the subtree agree unanimously on X
+#                 (ii)  max intra-subtree patristic distance ≤ PHYLO_RANK_THRESHOLDS
+#                 (iii) ALL tips in the full tree carrying X at rank R fall within
+#                       the subtree (strict monophyly; paraphyletic nodes rejected)
+#             – For each "Unclassified" tip: walk tip → root; assign ranks from
+#               the deepest ancestor that carries a qualifying label; fill coarser
+#               ranks still unresolved by unanimous consensus of known sequences
+#               in that ancestor's subtree
+#             – Taxize re-verification + higher-rank lineage fill
+#         9c. After the tree step
+#             – neighbour check (as 9a) of the labels added by 9b
+#             – fill ranks still "Unclassified" when ≥ MIN_SUPPORT_FILL
+#               original-record neighbours agree (≥ MIN_AGREEMENT) and the parent
+#               matches the sequence's own parent label
+#             – lineage consistency (as 9a)
+#         9d. Write the curated FASTA (8 fields), the dada2 assignTaxonomy
+#             training file (Kingdom…Genus), the dada2 addSpecies file and a
+#             change log with the evidence for every label change
 #   10. Write accession correspondence TSV
 #
 # Required R packages (install once):
@@ -46,7 +68,7 @@
 #   BiocManager::install("Biostrings")
 #
 # External tools (must be on PATH or paths set below):
-#   conda install -c bioconda hmmer mafft blast cd-hit fasttree
+#   conda install -c bioconda hmmer mafft blast cd-hit fasttree vsearch
 #
 # Usage:
 #   Rscript build_mcrA_db.R
@@ -82,6 +104,8 @@ LOG_FILE         <- "build_mcrA_db_R.log"
 
 ENTREZ_EMAIL     <- Sys.getenv("NCBI_EMAIL",    "your.email@example.com")  # required by NCBI
 ENTREZ_API_KEY   <- Sys.getenv("NCBI_API_KEY", "")  # optional but raises rate limit to 10 req/s
+if (nchar(ENTREZ_API_KEY) > 0 && !nzchar(Sys.getenv("ENTREZ_KEY")))
+  Sys.setenv(ENTREZ_KEY = ENTREZ_API_KEY)   # taxize reads ENTREZ_KEY
 # To set permanently, add to ~/.Renviron:
 #   NCBI_EMAIL=your.email@example.com
 #   NCBI_API_KEY=<your key from https://www.ncbi.nlm.nih.gov/account/>
@@ -183,6 +207,34 @@ PHYLO_CURATE_TAXONOMY <- TRUE          # set FALSE to skip Step 9
 FASTTREE_PATH         <- "~/anaconda3/bin/FastTree"  # full path; auto-resolved at runtime
 TREE_FILE             <- "mcrA_ncbi_nt_db.nwk"         # Newick tree — open in FigTree / iTOL
 OUTPUT_FILE_CURATED   <- "mcrA_ncbi_nt_cur_db.fasta"    # taxonomy-curated DADA2 FASTA
+
+# ── Step 9a / 9c: neighbour-guided label cleaning and filling ─────────────────
+VSEARCH_PATH       <- "vsearch"
+VSEARCH_THREADS    <- 24
+NEIGHBOUR_MIN_ID   <- 0.80   # lowest identity reported by vsearch
+NEIGHBOUR_MAX_HITS <- 100    # --maxaccepts
+MIN_AGREEMENT      <- 0.90   # fraction of voting neighbours that must agree
+MIN_SUPPORT_FIX    <- 3      # neighbours needed to replace a named label
+MIN_SUPPORT_FILL   <- 2      # neighbours needed to fill an "Unclassified" rank
+CALIB_MIN_PAIRS    <- 30     # positive and negative pairs needed per rank
+PRECISION_TARGET   <- 0.98   # share of neighbour pairs above the cut-off that
+                             # must carry the same taxon (in mcrA_ncbi_nt_db
+                             # 1-2 % of original-record pairs disagree even at
+                             # 100 % identity, so 0.99 is not reachable at
+                             # order-genus level)
+FAST_NODE_LABELLING <- TRUE  # exact re-implementations of node labelling and
+                             # leaf-to-root propagation (the original functions
+                             # need a 27,942 x 27,942 patristic matrix and tip
+                             # lists for every node); FALSE uses the originals
+TRAIN_MIN_RANK     <- "phylum"  # dada2 training set: references unknown at this
+                                # rank are left out
+REFINE_UNRES_PATTERN <- "^(Unclassified|unclassified|uncultured|NA|)$|^uncultured|_unclassified$"
+NEIGHBOURS_FILE              <- "mcrA_ncbi_nt_db_neighbours.tsv"
+OUTPUT_FILE_CURATED_TRAIN    <- "mcrA_ncbi_nt_cur_db_dada2_toGenus.fasta"  # assignTaxonomy
+OUTPUT_FILE_CURATED_SPECIES  <- "mcrA_ncbi_nt_cur_db_dada2_species.fasta"  # addSpecies
+OUTPUT_FILE_CURATION_CHANGES <- "mcrA_ncbi_nt_cur_db_changes.tsv"
+OUTPUT_FILE_CURATION_CUTOFFS <- "mcrA_ncbi_nt_cur_db_identity_cutoffs.tsv"
+OUTPUT_FILE_CURATION_SUMMARY <- "mcrA_ncbi_nt_cur_db_curation_summary.tsv"
 
 PHYLO_RANK_THRESHOLDS <- c(           # max patristic distance per rank (GTR subst/site via FastTree)
   # species omitted — J=0.000, AUC=0.078: cannot discriminate by distance
@@ -868,7 +920,7 @@ correct_lineage_names <- function(lineage) {
 
   corrected <- tryCatch({
     # Use taxize::get_uid to look up the species in NCBI taxonomy
-    uid_result <- taxize::get_uid(sci = species, db = "ncbi",
+    uid_result <- taxize::get_uid(species, db = "ncbi",
                                   ask = FALSE, messages = FALSE)
     uid <- uid_result[[1]]
 
@@ -974,7 +1026,7 @@ fill_lineage_from_taxize <- function(lineage) {
 
   # Query NCBI via taxize
   taxize_lin <- tryCatch({
-    uid_res <- taxize::get_uid(sci = query_name, db = "ncbi",
+    uid_res <- taxize::get_uid(query_name, db = "ncbi",
                                ask = FALSE, messages = FALSE)
     uid <- uid_res[[1L]]
     if (is.na(uid)) stop("no uid")
@@ -1992,6 +2044,504 @@ curate_taxonomy_leaf_to_root <- function(tree, tip_lineages, node_labels) {
 
 
 # =============================================================================
+# STEP 9a / 9c helper functions — neighbour-guided label cleaning and filling
+# =============================================================================
+
+UNK <- "Unclassified"
+
+changes <- list()
+record_changes <- function(stage, i, k, old, new, n_top = NA, n_total = NA) {
+  if (!length(i)) return(invisible())
+  changes[[length(changes) + 1L]] <<- data.frame(
+    stage = stage, accession = db$acc[i], rank = RANKS[k], old = old, new = new,
+    n_support = n_top, n_voting = n_total, stringsAsFactors = FALSE)
+}
+
+unclassified_counts <- function(lab, stage) {
+  data.frame(stage = stage, rank = RANKS,
+             unclassified = colSums(lab[, RANKS, drop = FALSE] == UNK),
+             distinct_names = vapply(RANKS, function(r) length(setdiff(unique(lab[, r]), UNK)), 0L),
+             row.names = NULL)
+}
+
+# All-vs-all nearest neighbours (self hits excluded by unique labels + --self)
+run_vsearch_neighbours <- function(seqs, out_tsv) {
+  fa <- tempfile(fileext = ".fasta")
+  writeLines(paste0(">", seq_along(seqs), "\n", seqs), fa)
+  cmd <- sprintf(paste("%s --usearch_global %s --db %s --self --strand plus",
+                       "--id %.2f --maxaccepts %d --maxrejects %d --threads %d",
+                       "--userfields query+target+id --userout %s --quiet"),
+                 VSEARCH_PATH, shQuote(fa), shQuote(fa), NEIGHBOUR_MIN_ID,
+                 NEIGHBOUR_MAX_HITS, NEIGHBOUR_MAX_HITS * 10L, VSEARCH_THREADS, shQuote(out_tsv))
+  if (system(cmd) != 0) stop("vsearch failed: ", cmd)
+  h <- read.delim(out_tsv, header = FALSE, col.names = c("q", "t", "id"))
+  h$id <- h$id / 100
+  h
+}
+
+# Youden J cut-off on % identity: same-taxon vs different-taxon neighbour pairs
+calibrate_cutoffs <- function(hits, lab, voter) {
+  grid <- seq(NEIGHBOUR_MIN_ID, 1, by = 0.001)
+  res <- lapply(seq_along(RANKS), function(k) {
+    ok <- voter[hits$q, k] & voter[hits$t, k] &
+          lab[hits$q, k] != UNK & lab[hits$t, k] != UNK
+    same <- lab[hits$q[ok], k] == lab[hits$t[ok], k]
+    id   <- hits$id[ok]
+    n_pos <- sum(same); n_neg <- sum(!same)
+    if (n_pos < CALIB_MIN_PAIRS || n_neg < CALIB_MIN_PAIRS)
+      return(data.frame(rank = RANKS[k], youden_cutoff = NA, J = NA, precision_cutoff = NA,
+                        n_same = n_pos, n_diff = n_neg))
+    pos <- sort(id[same]); neg <- sort(id[!same])
+    sens <- 1 - findInterval(grid, pos, left.open = TRUE) / n_pos   # P(id >= t | same)
+    spec <- findInterval(grid, neg, left.open = TRUE) / n_neg       # P(id <  t | diff)
+    J <- sens + spec - 1
+    b <- which.max(J)
+    # Precision cut-off: lowest identity t such that, for every s >= t, at
+    # least PRECISION_TARGET of the pairs with identity >= s share the taxon
+    n_above_pos <- n_pos - findInterval(grid, pos, left.open = TRUE)
+    n_above_neg <- n_neg - findInterval(grid, neg, left.open = TRUE)
+    prec <- n_above_pos / pmax(1, n_above_pos + n_above_neg)
+    okp  <- rev(cumprod(rev(prec >= PRECISION_TARGET))) == 1 &
+            (n_above_pos + n_above_neg) >= CALIB_MIN_PAIRS
+    pc <- if (any(okp)) grid[which(okp)[1L]] else NA
+    data.frame(rank = RANKS[k], youden_cutoff = grid[b], J = round(J[b], 3),
+               precision_cutoff = pc, n_same = n_pos, n_diff = n_neg)
+  })
+  res <- do.call(rbind, res)
+  # The precision cut-off is used (Youden J is reported for comparison).
+  # A rank without enough pairs takes the cut-off of the nearest finer
+  # calibrated rank (sharing a finer taxon implies sharing the coarser one).
+  # Cut-offs are then made non-decreasing from kingdom to genus, so a finer
+  # rank never accepts neighbours that a coarser rank would reject.
+  cut <- res$precision_cutoff
+  for (k in rev(seq_along(cut))) if (is.na(cut[k]))
+    cut[k] <- if (k < length(cut)) cut[k + 1L] else res$youden_cutoff[k]
+  if (anyNA(cut)) stop("no identity cut-off could be calibrated for: ",
+                       paste(RANKS[is.na(cut)], collapse = ", "))
+  res$cutoff <- cummax(cut)
+  res$source <- ifelse(is.na(res$precision_cutoff), "nearest finer rank",
+                ifelse(res$cutoff > res$precision_cutoff, "raised to coarser rank", "precision"))
+  # Share of voter pairs at or above the cut-off that carry the same taxon
+  res$same_taxon_above_cutoff <- vapply(seq_along(RANKS), function(k) {
+    ok <- voter[hits$q, k] & voter[hits$t, k] & lab[hits$q, k] != UNK &
+          lab[hits$t, k] != UNK & hits$id >= res$cutoff[k]
+    round(mean(lab[hits$q[ok], k] == lab[hits$t[ok], k]), 4)
+  }, 0)
+  res
+}
+
+# Majority vote of usable neighbours at rank k for every query
+vote_rank <- function(k, lab, voter, hits, cutoff) {
+  h <- hits[hits$id >= cutoff, c("q", "t")]
+  v <- lab[h$t, k]
+  ok <- voter[h$t, k] & v != UNK
+  h <- h[ok, ]; v <- v[ok]
+  if (!nrow(h)) return(NULL)
+  key <- paste(h$q, v, sep = "\t")
+  tab <- table(key)
+  sp  <- strsplit(names(tab), "\t", fixed = TRUE)
+  df  <- data.frame(q = as.integer(vapply(sp, `[`, "", 1L)),
+                    taxon = vapply(sp, `[`, "", 2L), n = as.integer(tab),
+                    stringsAsFactors = FALSE)
+  df$total <- ave(df$n, df$q, FUN = sum)
+  df  <- df[order(df$q, -df$n), ]
+  top <- df[!duplicated(df$q), ]
+  own_key <- paste(top$q, lab[top$q, k], sep = "\t")
+  top$n_own <- as.integer(tab[own_key]); top$n_own[is.na(top$n_own)] <- 0L
+  top
+}
+
+# name at rank k → parent name at rank k-1 supported by >= MIN_AGREEMENT of voters
+canonical_parents <- function(lab, voter) {
+  out <- vector("list", length(RANKS))
+  for (k in 2:length(RANKS)) {
+    ok <- voter[, k] & voter[, k - 1L] & lab[, k] != UNK & lab[, k - 1L] != UNK
+    if (!any(ok)) { out[[k]] <- character(0); next }
+    tb <- table(lab[ok, k], lab[ok, k - 1L])
+    best <- apply(tb, 1L, function(x) if (max(x) / sum(x) >= MIN_AGREEMENT)
+                  colnames(tb)[which.max(x)] else NA_character_)
+    out[[k]] <- best[!is.na(best)]
+  }
+  out
+}
+
+canonical_lineage <- function(name, k, parents) {
+  lin <- rep(NA_character_, k); lin[k] <- name
+  if (k > 1L) for (j in k:2) {
+    p <- parents[[j]][lin[j]]
+    if (is.na(p)) break
+    lin[j - 1L] <- p
+  }
+  lin
+}
+
+# Each named rank takes its canonical parent (fills "Unclassified" parents too)
+enforce_lineages <- function(lab, parents, protect, stage) {
+  for (k in length(RANKS):2) {
+    for (i in which(lab[, k] != UNK & !protect)) {
+      p <- parents[[k]][lab[i, k]]
+      if (is.na(p) || lab[i, k - 1L] == p) next
+      record_changes(stage, i, k - 1L, lab[i, k - 1L], p)
+      lab[i, k - 1L] <- p
+    }
+  }
+  lab
+}
+
+# A4 / C1: replace or blank named labels contradicted by near neighbours
+check_named_labels <- function(lab, src, voter, hits, cut, parents,
+                               candidates, stage, new_src) {
+  for (k in seq_along(RANKS)) {
+    top <- vote_rank(k, lab, voter, hits, cut[k])
+    if (is.null(top)) next
+    top <- top[candidates[top$q, k] & lab[top$q, k] != UNK, ]
+    fix <- top[top$taxon != lab[top$q, k] & top$n >= MIN_SUPPORT_FIX &
+               top$n / top$total >= MIN_AGREEMENT, ]
+    blank <- top[top$n_own == 0L & top$total >= MIN_SUPPORT_FIX &
+                 !(top$q %in% fix$q), ]
+    for (r in seq_len(nrow(fix))) {
+      i <- fix$q[r]; Y <- fix$taxon[r]
+      record_changes(stage, i, k, lab[i, k], Y, fix$n[r], fix$total[r])
+      lab[i, k] <- Y; src[i, k] <- new_src
+      canon <- canonical_lineage(Y, k, parents)
+      for (j in seq_len(k - 1L)) if (!is.na(canon[j]) && lab[i, j] != canon[j]) {
+        record_changes(stage, i, j, lab[i, j], canon[j]); lab[i, j] <- canon[j]; src[i, j] <- new_src
+      }
+      if (k < length(RANKS)) for (j in (k + 1L):length(RANKS)) {
+        if (lab[i, j] == UNK) next
+        if (!identical(unname(canonical_lineage(lab[i, j], j, parents)[k]), Y)) {
+          record_changes(stage, i, j, lab[i, j], UNK)
+          lab[i, j:length(RANKS)] <- UNK; src[i, j:length(RANKS)] <- new_src
+          break
+        }
+      }
+    }
+    for (r in seq_len(nrow(blank))) {
+      i <- blank$q[r]
+      record_changes(paste0(stage, "_blank"), i, k, lab[i, k], UNK, blank$n[r], blank$total[r])
+      lab[i, k:length(RANKS)] <- UNK; src[i, k:length(RANKS)] <- new_src
+    }
+    mcra_log(sprintf("  %-8s cut-off %.3f: %d replaced, %d blanked",
+                     RANKS[k], cut[k], nrow(fix), nrow(blank)))
+  }
+  list(lab = lab, src = src)
+}
+
+# C2: fill "Unclassified" ranks from agreeing original-record neighbours
+fill_unclassified <- function(lab, src, voter, hits, cut, parents, blind, stage) {
+  for (k in seq_along(RANKS)) {
+    top <- vote_rank(k, lab, voter, hits, cut[k])
+    if (is.null(top)) next
+    top <- top[lab[top$q, k] == UNK & !blind[top$q] &
+               top$n >= MIN_SUPPORT_FILL & top$n / top$total >= MIN_AGREEMENT, ]
+    if (k > 1L) {
+      par <- parents[[k]][top$taxon]
+      top <- top[!is.na(par) & lab[top$q, k - 1L] == par, ]
+    }
+    record_changes(stage, top$q, k, rep(UNK, nrow(top)), top$taxon, top$n, top$total)
+    lab[cbind(top$q, k)] <- top$taxon
+    src[cbind(top$q, k)] <- "neighbour_fill"
+    mcra_log(sprintf("  %-8s cut-off %.3f: %d filled", RANKS[k], cut[k], nrow(top)))
+  }
+  list(lab = lab, src = src)
+}
+
+# =============================================================================
+# STEP 9 node labelling — exact, memory-light re-implementation
+# =============================================================================
+# label_internal_nodes_by_taxonomy() builds the full patristic matrix
+# (27,942² doubles ≈ 6 GB) and scans every sub-matrix.  This version computes
+# the same three conditions in one post-order pass:
+#   max patristic distance within a clade = clade diameter
+#     (max over internal nodes of the two deepest child paths),
+#   unanimity = the clade's classified tips carry one taxon,
+#   strict monophyly = the clade holds every tip of that taxon in the tree.
+label_internal_nodes_fast <- function(tree, tip_lineages, rank_thresholds) {
+  n_tips <- length(tree$tip.label); n_all <- n_tips + tree$Nnode
+  tr <- reorder(tree, "postorder")
+  bl <- if (is.null(tr$edge.length)) rep(0, nrow(tr$edge)) else tr$edge.length
+  height <- numeric(n_all); diam <- numeric(n_all)
+  top1 <- rep(-Inf, n_all); top2 <- rep(-Inf, n_all)
+  root <- n_tips + 1L
+  ranks <- names(rank_thresholds)
+  tx  <- matrix(0L, n_all, length(ranks), dimnames = list(NULL, ranks))
+  cnt <- matrix(0L, n_all, length(ranks))
+  taxa <- list(); total <- list()
+  for (r in seq_along(ranks)) {
+    v <- vapply(tree$tip.label, function(t) {
+      l <- tip_lineages[[t]]
+      if (is.null(l) || is.na(l[ranks[r]]) || l[ranks[r]] == "Unclassified") NA_character_
+      else unname(l[ranks[r]])
+    }, "")
+    f <- factor(v); taxa[[r]] <- levels(f)
+    tx[seq_len(n_tips), r] <- ifelse(is.na(f), 0L, as.integer(f))
+    cnt[seq_len(n_tips), r] <- as.integer(!is.na(f))
+    total[[r]] <- tabulate(as.integer(f[!is.na(f)]), nbins = length(levels(f)))
+  }
+  finalize <- function(p) {
+    if (p > n_tips) {
+      height[p] <<- top1[p]
+      if (is.finite(top2[p])) diam[p] <<- max(diam[p], top1[p] + top2[p])
+    }
+  }
+  for (e in seq_len(nrow(tr$edge))) {
+    p <- tr$edge[e, 1L]; c <- tr$edge[e, 2L]
+    finalize(c)
+    val <- height[c] + bl[e]
+    if (val > top1[p]) { top2[p] <- top1[p]; top1[p] <- val }
+    else if (val > top2[p]) top2[p] <- val
+    diam[p] <- max(diam[p], diam[c])
+    for (r in seq_along(ranks)) {
+      tc <- tx[c, r]
+      if (tc == 0L) next
+      tp <- tx[p, r]
+      if (tp == 0L) { tx[p, r] <- tc; cnt[p, r] <- cnt[c, r] }
+      else if (tp > 0L && tp == tc) cnt[p, r] <- cnt[p, r] + cnt[c, r]
+      else tx[p, r] <- -1L
+    }
+  }
+  finalize(root)
+  node_labels <- vector("list", n_all)
+  for (node in seq(n_tips + 1L, n_all)) {
+    labels <- setNames(rep(NA_character_, length(TAX_LEVELS)), TAX_LEVELS)
+    for (r in seq_along(ranks)) {
+      thr <- rank_thresholds[r]
+      if (is.na(thr) || diam[node] > thr) next
+      t <- tx[node, r]
+      if (t <= 0L) next
+      if (cnt[node, r] != total[[r]][t]) next
+      labels[ranks[r]] <- taxa[[r]][t]
+    }
+    if (any(!is.na(labels))) node_labels[[node]] <- labels
+  }
+  node_labels
+}
+
+# curate_taxonomy_leaf_to_root() pre-computes the tip list of every internal
+# node (≈ n²/2 entries on a deep 27,942-tip tree).  Only labelled nodes can be
+# anchors, so this version lists tips for those nodes alone: each tip's anchor
+# is the deepest labelled node above it, and the consensus of each anchor's
+# subtree is computed once.  Assignments are the same as the original.
+curate_leaf_to_root_fast <- function(tree, tip_lineages, node_labels) {
+  n_tips <- length(tree$tip.label)
+  curated <- tip_lineages; detail <- list()
+  lab_nodes <- which(!vapply(node_labels, is.null, TRUE))
+  lab_nodes <- lab_nodes[lab_nodes > n_tips]
+  if (!length(lab_nodes)) return(list(lineages = curated, n_updated = 0L, detail = detail))
+  n_anc <- vapply(lab_nodes, function(nd) length(phangorn::Ancestors(tree, nd, type = "all")), 0L)
+  lab_nodes <- lab_nodes[order(n_anc)]          # root-most first
+  anchor <- integer(n_tips)
+  sub_tips <- list()
+  for (nd in lab_nodes) {
+    idx <- phangorn::Descendants(tree, nd, type = "tips")[[1L]]
+    idx <- idx[idx <= n_tips]
+    sub_tips[[as.character(nd)]] <- idx
+    anchor[idx] <- nd                           # deeper labelled nodes overwrite
+  }
+  lin_mat <- do.call(rbind, lapply(tree$tip.label, function(t) {
+    l <- tip_lineages[[t]]; if (is.null(l)) rep(NA_character_, length(TAX_LEVELS)) else l[TAX_LEVELS]
+  }))
+  colnames(lin_mat) <- TAX_LEVELS
+  consensus <- lapply(sub_tips, function(idx) vapply(TAX_LEVELS, function(r) {
+    v <- lin_mat[idx, r]; v <- unique(v[!is.na(v) & v != "Unclassified"])
+    if (length(v) == 1L) v else NA_character_
+  }, ""))
+  for (i in which(anchor > 0L)) {
+    tn <- tree$tip.label[i]; lin <- tip_lineages[[tn]]
+    if (is.null(lin)) next
+    unknown <- TAX_LEVELS[!is.na(lin[TAX_LEVELS]) & lin[TAX_LEVELS] == "Unclassified"]
+    if (!length(unknown)) next
+    a <- as.character(anchor[i]); lbl <- node_labels[[anchor[i]]]; cons <- consensus[[a]]
+    new_lin <- lin; changed <- FALSE
+    for (r in unknown) if (!is.na(lbl[r])) { new_lin[r] <- lbl[r]; changed <- TRUE }
+    for (r in unknown) {
+      if (new_lin[r] != "Unclassified") next
+      if (!is.na(cons[r])) { new_lin[r] <- cons[r]; changed <- TRUE }
+    }
+    if (changed) { curated[[tn]] <- new_lin; detail[[tn]] <- list(before = lin, after = new_lin) }
+  }
+  list(lineages = curated, n_updated = length(detail), detail = detail)
+}
+
+run_step9 <- function(lab, tree, blind) {
+  safe <- tree$tip.label
+  lins <- lapply(seq_len(nrow(lab)), function(i) {
+    l <- lab[i, ]
+    if (blind[i]) l[RANKS] <- UNK
+    l
+  })
+  names(lins) <- db$safe_id
+  node_labels <- if (FAST_NODE_LABELLING)
+    label_internal_nodes_fast(tree, lins, PHYLO_RANK_THRESHOLDS)
+  else
+    label_internal_nodes_by_taxonomy(tree, lins,
+      as.matrix(ape::cophenetic.phylo(tree)), PHYLO_RANK_THRESHOLDS)
+  mcra_log(sprintf("  %d / %d internal nodes received at least one rank label",
+                   sum(!vapply(node_labels, is.null, TRUE)), tree$Nnode))
+  res <- if (FAST_NODE_LABELLING) curate_leaf_to_root_fast(tree, lins, node_labels)
+         else curate_taxonomy_leaf_to_root(tree, lins, node_labels)
+  mcra_log(sprintf("  Leaf-to-root curation: %d tip(s) received new rank labels", res$n_updated))
+  if (CORRECT_TAXONOMY && res$n_updated > 0L) {
+    mcra_log("  Verifying newly assigned names against NCBI (taxize)...")
+    for (sid in names(res$detail))
+      res$lineages[[sid]] <- correct_lineage_names(res$lineages[[sid]])
+  }
+  if (CORRECT_TAXONOMY) {
+    mcra_log("  Filling Unclassified higher ranks via taxize lineage lookup...")
+    for (sid in names(res$lineages))
+      res$lineages[[sid]] <- fill_lineage_from_taxize(res$lineages[[sid]])
+  }
+  out <- do.call(rbind, lapply(db$safe_id, function(s) res$lineages[[s]][TAX_LEVELS]))
+  out[blind, RANKS] <- lab[blind, RANKS]   # blinded tips keep their own labels
+  out
+}
+
+# =============================================================================
+# CURATION PIPELINE (blind = references hidden from every decision)
+# =============================================================================
+
+curate <- function(blind = rep(FALSE, length(db$acc)), quiet_stage = "") {
+  lab <- db$lab
+  # A1 — one spelling for "unknown"
+  for (r in RANKS) {
+    unres <- grepl(REFINE_UNRES_PATTERN, lab[, r])
+    if (!any(blind)) record_changes("A1_placeholder", which(unres & lab[, r] != UNK), match(r, RANKS),
+                                    lab[unres & lab[, r] != UNK, r], UNK)
+    lab[unres, r] <- UNK
+  }
+  if (!any(blind)) summary_rows[[length(summary_rows) + 1L]] <<- unclassified_counts(lab, "A1 placeholders collapsed")
+
+  genome <- grepl("^GC[AF]_", db$acc)
+  src <- matrix(ifelse(genome, "genome", "original"), length(db$acc), length(RANKS))
+  src[lab[, RANKS] == UNK] <- "none"
+  voter_of <- function(src) (src %in% c("genome", "original", "neighbour_fix")) & !blind
+  voter <- matrix(voter_of(src), ncol = length(RANKS))
+
+  # A2 — identity cut-offs
+  cal <- calibrate_cutoffs(hits, lab, voter)
+  cut <- setNames(cal$cutoff, RANKS)
+  if (!any(blind)) {
+    write.table(cal, OUTPUT_FILE_CURATION_CUTOFFS, sep = "\t", quote = FALSE, row.names = FALSE)
+    for (r in seq_len(nrow(cal)))
+      mcra_log(sprintf("  %-8s identity cut-off %.3f  (%s; precision %s, Youden %s, J=%s, same=%d, diff=%d; same taxon above cut-off %.2f%%)",
+                       cal$rank[r], cal$cutoff[r], cal$source[r], cal$precision_cutoff[r], cal$youden_cutoff[r], cal$J[r],
+                       cal$n_same[r], cal$n_diff[r], 100 * cal$same_taxon_above_cutoff[r]))
+  }
+
+  # A3 — lineage consistency
+  parents <- canonical_parents(lab, voter)
+  lab <- enforce_lineages(lab, parents, protect = genome | blind, stage = "A3_lineage")
+
+  # A4 — neighbour check of named labels
+  mcra_log("[A4] Neighbour check of named labels")
+  cand <- matrix(!(genome | blind), length(db$acc), length(RANKS))
+  r <- check_named_labels(lab, src, voter, hits, cut, parents, cand, "A4_neighbour_fix", "neighbour_fix")
+  lab <- r$lab; src <- r$src
+  if (!any(blind)) summary_rows[[length(summary_rows) + 1L]] <<- unclassified_counts(lab, "A pre-Step 9 cleaning")
+
+  # B — Step 9 re-run
+  mcra_log("[B] Step 9 re-run")
+  lab9 <- run_step9(lab, tree, blind)
+  added <- lab[, RANKS] == UNK & lab9[, RANKS] != UNK
+  changed <- lab[, RANKS] != UNK & lab9[, RANKS] != lab[, RANKS]
+  if (!any(blind)) for (k in seq_along(RANKS)) {
+    record_changes("B_step9", which(added[, k]), k, lab[added[, k], k], lab9[added[, k], k])
+    record_changes("B_step9_taxize", which(changed[, k]), k, lab[changed[, k], k], lab9[changed[, k], k])
+  }
+  src[added | changed] <- "step9"
+  lab <- lab9
+  if (!any(blind)) summary_rows[[length(summary_rows) + 1L]] <<- unclassified_counts(lab, "B Step 9 re-run")
+
+  # C1 — neighbour check of the labels Step 9 added
+  mcra_log("[C1] Neighbour check of Step 9 labels")
+  voter <- matrix(voter_of(src), ncol = length(RANKS))
+  r <- check_named_labels(lab, src, voter, hits, cut, parents, src == "step9" & !blind,
+                          "C1_step9_fix", "step9_fix")
+  lab <- r$lab; src <- r$src
+
+  # C2 — neighbour fill
+  mcra_log("[C2] Neighbour fill of Unclassified ranks")
+  r <- fill_unclassified(lab, src, voter, hits, cut, parents, blind, "C2_neighbour_fill")
+  lab <- r$lab; src <- r$src
+
+  # C3 — lineage consistency
+  lab <- enforce_lineages(lab, parents, protect = genome | blind, stage = "C3_lineage")
+  if (!any(blind)) summary_rows[[length(summary_rows) + 1L]] <<- unclassified_counts(lab, "C post-Step 9")
+  lab
+}
+
+# =============================================================================
+# OUTPUT WRITERS
+# =============================================================================
+
+write_full_db <- function(lab, path) {
+  hdr <- vapply(seq_along(db$acc), function(i) format_dada2_header(lab[i, ], db$acc[i]), "")
+  writeLines(paste0(hdr, "\n", db$seq), path)
+}
+
+# Kingdom…Genus, truncated at the first unknown rank; exact duplicates collapse
+# to their longest common lineage prefix; unknown at TRAIN_MIN_RANK → dropped
+training_set <- function(lab, keep = rep(TRUE, nrow(lab))) {
+  lab <- lab[keep, RANKS, drop = FALSE]; seqs <- db$seq[keep]
+  depth <- apply(lab != UNK, 1L, function(x) if (all(x)) length(x) else which.min(x) - 1L)
+  grp <- split(seq_along(seqs), seqs)
+  out_seq <- character(0); out_lin <- character(0)
+  for (g in grp) {
+    d <- min(depth[g])
+    if (length(g) > 1L && d > 0L) {
+      same <- vapply(seq_len(d), function(k) length(unique(lab[g, k])) == 1L, TRUE)
+      d <- if (all(same)) d else which.min(same) - 1L
+    }
+    if (d < match(TRAIN_MIN_RANK, RANKS)) next
+    out_seq <- c(out_seq, seqs[g[1L]])
+    out_lin <- c(out_lin, paste0(paste(lab[g[1L], seq_len(d)], collapse = ";"), ";"))
+  }
+  list(seq = out_seq, lin = out_lin)
+}
+
+species_set <- function(lab, keep = rep(TRUE, nrow(lab))) {
+  sp <- db$lab[, "species"]
+  words <- strsplit(sp, " ", fixed = TRUE)
+  g <- vapply(words, `[`, "", 1L); e <- vapply(words, function(w) if (length(w) > 1L) w[2L] else "", "")
+  ok <- keep & lab[, "genus"] != UNK & g == lab[, "genus"] &
+        grepl("^[a-z][a-z-]+$", e) & !e %in% c("sp", "spp", "archaeon", "cf", "aff")
+  list(id = db$acc[ok], seq = db$seq[ok], name = paste(g[ok], e[ok]))
+}
+
+# ── Step 9 driver: 9a cleaning → 9b tree curation → 9c fill; writes 9d files ──
+refine_and_curate_step9 <- function(accs, safe_pool, safe_lins, phy_tree) {
+  RANKS <<- setdiff(TAX_LEVELS, "species")
+  lab <- do.call(rbind, lapply(names(safe_pool), function(s) {
+    l <- safe_lins[[s]][TAX_LEVELS]; l[is.na(l)] <- UNK; l }))
+  colnames(lab) <- TAX_LEVELS
+  db <<- list(acc = unname(accs), seq = toupper(unname(safe_pool)), lab = lab,
+              safe_id = names(safe_pool))
+  tree <<- phy_tree
+  changes <<- list()
+  summary_rows <<- list(unclassified_counts(lab, "input (Step 8 lineages)"))
+  mcra_log("  [9a] Nearest-neighbour search (vsearch, all vs all)")
+  hits <<- run_vsearch_neighbours(db$seq, NEIGHBOURS_FILE)
+  mcra_log(sprintf("  %d neighbour pairs at >= %.2f identity", nrow(hits), NEIGHBOUR_MIN_ID))
+  lab_final <- curate()
+
+  ts <- training_set(lab_final)
+  writeLines(paste0(">", ts$lin, "\n", ts$seq), OUTPUT_FILE_CURATED_TRAIN)
+  ss <- species_set(lab_final)
+  writeLines(paste0(">", ss$id, " ", ss$name, "\n", ss$seq), OUTPUT_FILE_CURATED_SPECIES)
+  ch <- if (length(changes)) do.call(rbind, changes) else data.frame()
+  write.table(ch, OUTPUT_FILE_CURATION_CHANGES, sep = "\t", quote = FALSE, row.names = FALSE)
+  write.table(do.call(rbind, summary_rows), OUTPUT_FILE_CURATION_SUMMARY,
+              sep = "\t", quote = FALSE, row.names = FALSE)
+  mcra_log(sprintf("  dada2 training set: %d sequences → %s", length(ts$seq), OUTPUT_FILE_CURATED_TRAIN))
+  mcra_log(sprintf("  dada2 species set : %d sequences → %s", length(ss$id), OUTPUT_FILE_CURATED_SPECIES))
+  if (nrow(ch)) for (s in unique(ch$stage))
+    mcra_log(sprintf("  label changes %-24s %d", s, sum(ch$stage == s)))
+
+  list(lineages = setNames(lapply(seq_len(nrow(lab_final)), function(i) lab_final[i, TAX_LEVELS]),
+                           db$safe_id))
+}
+
+# =============================================================================
 # STEP 5d — Template sequence merging (fill taxa gaps in current DB)
 # =============================================================================
 #
@@ -2457,64 +3007,13 @@ main <- function() {
         mcra_log(sprintf("  Tree: %d tips, %d internal nodes",
                          length(phy_tree$tip.label), phy_tree$Nnode))
 
-        # ── Patristic distance matrix ────────────────────────────────────────
-        mcra_log("  Computing patristic distances...")
-        pat_mat <- tryCatch(
-          as.matrix(ape::cophenetic.phylo(phy_tree)),
-          error = function(e) { mcra_log(sprintf("  cophenetic failed: %s", e$message), "WARN"); NULL }
+        # ── 9a cleaning → 9b tree curation → 9c fill ─────────────────────────
+        curate_res <- tryCatch(
+          refine_and_curate_step9(final_accs, safe_pool2, safe_lins2, phy_tree),
+          error = function(e) { mcra_log(sprintf("  Curation failed: %s", e$message), "WARN"); NULL }
         )
 
-        if (!is.null(pat_mat)) {
-          # ── Label internal nodes ──────────────────────────────────────────
-          mcra_log("  Labelling internal nodes (monophyly + distance thresholds)...")
-          node_labels <- label_internal_nodes_by_taxonomy(
-            phy_tree, safe_lins2, pat_mat, PHYLO_RANK_THRESHOLDS
-          )
-          n_labelled <- sum(!sapply(node_labels, is.null))
-          mcra_log(sprintf("  %d / %d internal nodes received at least one rank label",
-                           n_labelled, phy_tree$Nnode))
-
-          # ── Propagate to unclassified tips ────────────────────────────────
-          mcra_log("  Leaf-to-root curation: assigning deepest monophyletic label + consensus lineage fill ...")
-          curate_res <- curate_taxonomy_leaf_to_root(phy_tree, safe_lins2, node_labels)
-          mcra_log(sprintf("  Phylo curation: %d tip(s) received new rank labels",
-                           curate_res$n_updated))
-
-          # ── Taxize verification for updated sequences ─────────────────────
-          if (CORRECT_TAXONOMY && curate_res$n_updated > 0L) {
-            mcra_log("  Verifying newly assigned names against NCBI (taxize)...")
-            n_verified <- 0L
-            for (safe_id in names(curate_res$detail)) {
-              new_lin <- curate_res$lineages[[safe_id]]
-              verified <- correct_lineage_names(new_lin)
-              curate_res$lineages[[safe_id]] <- verified
-              n_verified <- n_verified + 1L
-            }
-            mcra_log(sprintf("  Taxize verification complete for %d sequence(s)", n_verified))
-          }
-
-          # ── Fill Unclassified higher ranks from most specific known rank ──
-          # Applied to ALL sequences (not just phylo-curated ones): if a
-          # sequence has e.g. Genus annotated but Family/Order/Class Unclassified,
-          # taxize is queried to fill in the consistent higher-rank names.
-          # Existing non-Unclassified annotations are never overridden; if a
-          # conflict is detected the fill is skipped with a warning.
-          if (CORRECT_TAXONOMY) {
-            mcra_log("  Filling Unclassified higher ranks via taxize lineage lookup...")
-            n_filled <- 0L
-            for (safe_id in names(curate_res$lineages)) {
-              lin <- curate_res$lineages[[safe_id]]
-              if (is.null(lin)) next
-              filled <- fill_lineage_from_taxize(lin)
-              if (!identical(filled, lin)) {
-                curate_res$lineages[[safe_id]] <- filled
-                n_filled <- n_filled + 1L
-              }
-            }
-            mcra_log(sprintf("  Lineage fill complete: %d sequence(s) had higher ranks populated",
-                             n_filled))
-          }
-
+        if (!is.null(curate_res)) {
           # ── Write curated FASTA ───────────────────────────────────────────
           mcra_log(sprintf("  Writing curated FASTA → %s", OUTPUT_FILE_CURATED))
           fh_cur      <- file(OUTPUT_FILE_CURATED, "w")
@@ -2542,7 +3041,7 @@ main <- function() {
           mcra_log(sprintf("  Tree saved for review → %s  (open in FigTree / iTOL)",
                            TREE_FILE))
         } else {
-          mcra_log("  Patristic distance matrix failed — curation skipped", "WARN")
+          mcra_log("  Curation failed — curated FASTA not written", "WARN")
         }
       } else {
         mcra_log("  Could not read tree file — curation skipped", "WARN")
@@ -2581,9 +3080,8 @@ main <- function() {
   mcra_log('                                       "Order","Family","Genus","Species","Accession"))')
   if (PHYLO_CURATE_TAXONOMY) {
     mcra_log("\nTo use curated database in DADA2:")
-    mcra_log(sprintf('  taxa <- assignTaxonomy(seqs, "%s", multithread = TRUE,', OUTPUT_FILE_CURATED))
-    mcra_log('                         taxLevels = c("Kingdom","Phylum","Class",')
-    mcra_log('                                       "Order","Family","Genus","Species","Accession"))')
+    mcra_log(sprintf('  taxa <- assignTaxonomy(seqs, "%s", multithread = TRUE)', OUTPUT_FILE_CURATED_TRAIN))
+    mcra_log(sprintf('  taxa <- addSpecies(taxa, "%s")', OUTPUT_FILE_CURATED_SPECIES))
   }
 }
 
